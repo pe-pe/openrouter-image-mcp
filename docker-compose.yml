@@ -1,0 +1,27 @@
+services:
+  openrouter-image-mcp:
+    build: .
+    image: openrouter-image-mcp:local
+    ports:
+      - '3333:3333'
+    environment:
+      HOST: 0.0.0.0
+      PORT: '3333'
+      OPENROUTER_API_BASE_URL: https://openrouter.ai/api/v1
+      DEFAULT_IMAGE_MODEL: recraft/recraft-v4.1-flash-v2:free
+      OPENROUTER_TIMEOUT_MS: '120000'
+      # Optional admin fallback. Per-user keys from LibreChat take precedence.
+      # OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:' + (process.env.PORT || '3333') + '/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

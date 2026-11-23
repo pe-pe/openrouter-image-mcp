@@ -1,0 +1,22 @@
+# LibreChat MCP server configuration snippet.
+# Add this under the top-level mcpServers key in your librechat.yaml.
+#
+# The URL below assumes LibreChat and this server run on the same Docker
+# network. For a local (non-Docker) LibreChat, use http://localhost:3333/mcp.
+mcpServers:
+  openrouter-image:
+    type: streamable-http
+    url: http://openrouter-image-mcp:3333/mcp
+    requiresOAuth: false
+    timeout: 120000
+    initTimeout: 30000
+    serverInstructions: true
+    apiKey:
+      source: user
+      authorization_type: bearer
+
+# If LibreChat's SSRF protection is enabled, allow the private host:port.
+# Entries use host:port without a scheme.
+# mcpSettings:
+#   allowedAddresses:
+#     - 'openrouter-image-mcp:3333'
