@@ -305,32 +305,38 @@ function errorResult(message) {
   };
 }
 
-let webpDecoderReady;
-function ensureWebpDecoder() {
-  if (!webpDecoderReady) {
-    webpDecoderReady = (async () => {
-      const require = createRequire(import.meta.url);
-      const wasmPath = require.resolve('@jsquash/webp/codec/dec/webp_dec.wasm');
-      await initWebpDecoder(await WebAssembly.compile(readFileSync(wasmPath)));
-    })();
+const nodeRequire = createRequire(import.meta.url);
+const WEBP_DECODER_WASM = '@jsquash/webp/codec/dec/webp_dec.wasm';
+const WEBP_ENCODER_WASM = '@jsquash/webp/codec/enc/webp_enc.wasm';
+
+const wasmInitializations = new Map();
+
+function ensureWasm(name, init, wasmPath) {
+  if (!wasmInitializations.has(name)) {
+    wasmInitializations.set(
+      name,
+      (async () => {
+        await init(await WebAssembly.compile(readFileSync(nodeRequire.resolve(wasmPath))));
+      })()
+    );
   }
-  return webpDecoderReady;
+  return wasmInitializations.get(name);
 }
 
-let webpEncoderReady;
+function ensureWebpDecoder() {
+  return ensureWasm('webp-decoder', initWebpDecoder, WEBP_DECODER_WASM);
+}
+
 function ensureWebpEncoder() {
-  if (!webpEncoderReady) {
-    webpEncoderReady = (async () => {
-      const require = createRequire(import.meta.url);
-      const wasmPath = require.resolve('@jsquash/webp/codec/enc/webp_enc.wasm');
-      await initWebpEncoder(await WebAssembly.compile(readFileSync(wasmPath)));
-    })();
-  }
-  return webpEncoderReady;
+  return ensureWasm('webp-encoder', initWebpEncoder, WEBP_ENCODER_WASM);
 }
 
 function isWebp(buffer) {
   return buffer.length >= 12 && buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP';
+}
+
+function toPreview(buffer, mimeType) {
+  return { data: Buffer.from(buffer).toString('base64'), mimeType };
 }
 
 async function decodeWebpToBitmap(buffer) {
@@ -356,6 +362,13 @@ async function readImage(buffer) {
   return Jimp.read(buffer);
 }
 
+function downsizeToShorterSide(image, target) {
+  const shorter = Math.min(image.width, image.height);
+  if (shorter <= target) return image;
+  image.resize(image.width <= image.height ? { w: target } : { h: target });
+  return image;
+}
+
 async function encodeWebpPreview(image) {
   await ensureWebpEncoder();
   const { data, width, height } = image.bitmap;
@@ -363,7 +376,7 @@ async function encodeWebpPreview(image) {
     { data: new Uint8ClampedArray(data.buffer, data.byteOffset, data.byteLength), width, height },
     { quality: PREVIEW_QUALITY }
   );
-  return { data: Buffer.from(encoded).toString('base64'), mimeType: 'image/webp' };
+  return toPreview(encoded, 'image/webp');
 }
 
 /**
@@ -378,20 +391,11 @@ async function fetchAndDownsizeImage(url, { timeoutMs } = {}) {
     const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
     if (!response.ok) return null;
     const buffer = Buffer.from(await response.arrayBuffer());
-    const image = await readImage(buffer);
-    const shorter = Math.min(image.width, image.height);
-    if (shorter > DOWNLOAD_SHORTER_SIDE) {
-      if (image.width <= image.height) {
-        image.resize({ w: DOWNLOAD_SHORTER_SIDE });
-      } else {
-        image.resize({ h: DOWNLOAD_SHORTER_SIDE });
-      }
-    }
+    const image = downsizeToShorterSide(await readImage(buffer), DOWNLOAD_SHORTER_SIDE);
     try {
       return await encodeWebpPreview(image);
     } catch {
-      const encoded = await image.getBuffer('image/png');
-      return { data: Buffer.from(encoded).toString('base64'), mimeType: 'image/png' };
+      return toPreview(await image.getBuffer('image/png'), 'image/png');
     }
   } catch (error) {
     console.error('[fetchAndDownsizeImage] failed:', error?.message || String(error));
@@ -422,12 +426,12 @@ async function formatResult(data, { model, config }) {
     }
     const hasB64 = typeof image.b64_json === 'string' && image.b64_json.length > 0;
     const hasUrl = typeof image.url === 'string' && image.url.length > 0;
-    const mimeType = typeof image.media_type === 'string' ? image.media_type : 'image/png';
 
     // OpenRouter-supplied b64_json is passed through as-is (no downsizing). A
     // downsized ~768px preview is only synthesized when OpenRouter omits b64_json
     // and returns a URL instead.
     if (hasB64) {
+      const mimeType = typeof image.media_type === 'string' ? image.media_type : 'image/png';
       content.push({ type: 'image', data: image.b64_json, mimeType });
       if (hasUrl) {
         content.push({ type: 'text', text: `Image ${index + 1}: ${image.url}` });
