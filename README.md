@@ -4,6 +4,10 @@ Minimal [Streamable HTTP](https://modelcontextprotocol.io/specification/2025-06-
 MCP server for LibreChat. It exposes exactly one tool, `generate_image`, and
 talks only to OpenRouter. There is no OAuth flow and no Fireworks provider.
 
+The tool returns the full-quality image URL(s) as text only. It never embeds
+image data (`b64_json`) in the response, so image bytes never enter the
+conversation or consume model tokens.
+
 The OpenRouter API key is read from the `Authorization: Bearer <key>` header on
 every MCP request. LibreChat supplies that header per user, so each generation
 bills to that user's own OpenRouter account. The key is never written to disk.
@@ -157,12 +161,9 @@ Example call from an MCP client:
 }
 ```
 
-The server always requests `response_format: url` from OpenRouter so the direct full-quality URL is available. The tool result is structured so a model can tell the preview from the real image:
+The server always requests `response_format: url` from OpenRouter. The tool result is text only: a `Generated N image URL(s)…` line, then `Image URLs (full quality):` with one numbered URL per image, then the usage summary. Any `b64_json` returned by OpenRouter is discarded.
 
-- a leading text block listing every full-quality URL as `Full-quality URL N: <url>`, plus the usage summary;
-- then, per image, a labeled `image` block: OpenRouter's `b64_json` is shown as `Inline image N (as returned by OpenRouter)` when present; when OpenRouter only returns a URL, the server fetches it (bounded to 30s) and shows `Preview N (downsized, not the full-quality image)` — a WebP downsized to ~768px on the shorter side (aspect preserved; WebP decoded via WASM, re-encoded at quality 82, PNG fallback).
-
-If OpenRouter returns neither field, the tool returns an error.
+If OpenRouter returns no URL, the tool returns an error.
 
 ## Models
 
@@ -185,19 +186,19 @@ list; OpenRouter validates the model and its parameters.
 
 ## Configuration
 
-| Variable                  | Default                              | Purpose                                                                                 |
-| ------------------------- | ------------------------------------ | --------------------------------------------------------------------------------------- |
-| `HOST`                    | `0.0.0.0`                            | Listen address                                                                          |
-| `PORT`                    | `3333`                               | Listen port                                                                             |
-| `OPENROUTER_API_BASE_URL` | `https://openrouter.ai/api/v1`       | API base; point at the mock for tests                                                   |
-| `OPENROUTER_API_KEY`      | empty                                | Optional admin fallback key                                                             |
-| `DEFAULT_IMAGE_MODEL`     | `recraft/recraft-v4.1-flash-v2:free` | Model used when `model` is omitted                                                      |
-| `OPENROUTER_TIMEOUT_MS`   | `120000`                             | OpenRouter request timeout                                                              |
-| `MAX_BODY_BYTES`          | `1000000`                            | Maximum MCP request body size                                                           |
-| `CORS_ORIGIN`             | empty                                | Comma-separated origins or `*`; empty disables CORS                                     |
-| `LOG_REQUESTS`            | `true`                               | Log HTTP requests and `generate_image` steps (timing, url/b64 presence, preview result) |
-| `OPENROUTER_APP_TITLE`    | `openrouter-image-mcp`               | OpenRouter `X-Title` header                                                             |
-| `OPENROUTER_APP_REFERER`  | empty                                | Optional OpenRouter `HTTP-Referer` header                                               |
+| Variable                  | Default                              | Purpose                                                                                   |
+| ------------------------- | ------------------------------------ | ----------------------------------------------------------------------------------------- |
+| `HOST`                    | `0.0.0.0`                            | Listen address                                                                            |
+| `PORT`                    | `3333`                               | Listen port                                                                               |
+| `OPENROUTER_API_BASE_URL` | `https://openrouter.ai/api/v1`       | API base; point at the mock for tests                                                     |
+| `OPENROUTER_API_KEY`      | empty                                | Optional admin fallback key                                                               |
+| `DEFAULT_IMAGE_MODEL`     | `recraft/recraft-v4.1-flash-v2:free` | Model used when `model` is omitted                                                        |
+| `OPENROUTER_TIMEOUT_MS`   | `120000`                             | OpenRouter request timeout                                                                |
+| `MAX_BODY_BYTES`          | `1000000`                            | Maximum MCP request body size                                                             |
+| `CORS_ORIGIN`             | empty                                | Comma-separated origins or `*`; empty disables CORS                                       |
+| `LOG_REQUESTS`            | `true`                               | Log HTTP requests and `generate_image` steps (timing, url/b64 presence; b64 is discarded) |
+| `OPENROUTER_APP_TITLE`    | `openrouter-image-mcp`               | OpenRouter `X-Title` header                                                               |
+| `OPENROUTER_APP_REFERER`  | empty                                | Optional OpenRouter `HTTP-Referer` header                                                 |
 
 ## Testing
 
@@ -215,7 +216,7 @@ The test suite covers:
 - health and root endpoints
 - CORS preflight and unknown paths
 - `tools/list` exposing only `generate_image`
-- base64 image content and URL responses
+- URL responses (no inline image data)
 - per-request API key forwarding and isolation between users
 - missing key rejection
 - arbitrary model slug passthrough
@@ -243,9 +244,9 @@ Terminal 3, run the smoke test:
 MCP_URL=http://127.0.0.1:3333/mcp OPENROUTER_API_KEY=test-key npm run smoke
 ```
 
-The smoke test checks the health endpoint, `tools/list`, base64 image content,
-URL responses, and missing-key rejection. It also proves the per-request
-`Authorization` header reaches OpenRouter.
+The smoke test checks the health endpoint, `tools/list`, URL responses, and
+missing-key rejection. It also proves the per-request `Authorization` header
+reaches OpenRouter.
 
 ## GitHub Actions
 
@@ -280,15 +281,14 @@ mock on `127.0.0.1:4010`. No real OpenRouter key is used in CI.
 
 ## Troubleshooting
 
-| Symptom                              | Fix                                                                                                                                                  |
-| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `No OpenRouter API key was provided` | Configure `customUserVars` for `OPENROUTER_API_KEY` in LibreChat (see LibreChat configuration) or send `Authorization: Bearer <key>`                 |
-| `401` from OpenRouter                | The user's key is invalid or revoked                                                                                                                 |
-| `402` from OpenRouter                | The user's OpenRouter account has insufficient credits                                                                                               |
-| `429` from OpenRouter                | Rate limit reached; retry later                                                                                                                      |
-| LibreChat cannot reach the server    | Use the Docker service name and allow the address in `mcpSettings.allowedAddresses`                                                                  |
-| `size` and `aspect_ratio` conflict   | Use either `size` or `aspect_ratio`/`resolution`, not both                                                                                           |
-| Inline preview is small/low quality  | The inline `image` block is a deliberate ~768px shorter-side downsized preview for chat display; the accompanying URL text is the full-quality image |
+| Symptom                              | Fix                                                                                                                                  |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `No OpenRouter API key was provided` | Configure `customUserVars` for `OPENROUTER_API_KEY` in LibreChat (see LibreChat configuration) or send `Authorization: Bearer <key>` |
+| `401` from OpenRouter                | The user's key is invalid or revoked                                                                                                 |
+| `402` from OpenRouter                | The user's OpenRouter account has insufficient credits                                                                               |
+| `429` from OpenRouter                | Rate limit reached; retry later                                                                                                      |
+| LibreChat cannot reach the server    | Use the Docker service name and allow the address in `mcpSettings.allowedAddresses`                                                  |
+| `size` and `aspect_ratio` conflict   | Use either `size` or `aspect_ratio`/`resolution`, not both                                                                           |
 
 ## License
 

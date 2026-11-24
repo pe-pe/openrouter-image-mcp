@@ -3,11 +3,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
-import { Jimp } from 'jimp';
-import decodeWebp, { init as initWebpDecoder } from '@jsquash/webp/decode.js';
-import encodeWebp, { init as initWebpEncoder } from '@jsquash/webp/encode.js';
 
 // ---------------------------------------------------------------------------
 // OpenRouter Image Generation MCP Server (Streamable HTTP)
@@ -25,9 +21,6 @@ const DEFAULT_ASPECT_RATIO = 'auto';
 const DEFAULT_OUTPUT_FORMAT = 'png';
 const DEFAULT_IMAGE_MODEL = 'recraft/recraft-v4.1-flash-v2:free';
 const MAX_ERROR_TEXT = 800;
-const DOWNLOAD_SHORTER_SIDE = 768;
-const PREVIEW_QUALITY = 82;
-const DOWNLOAD_TIMEOUT_MS = 30000;
 
 const ASPECT_RATIOS = [
   'auto',
@@ -310,141 +303,28 @@ function logInfo(config, message) {
   if (config.logRequests) console.log(`[generate_image] ${message}`);
 }
 
-const nodeRequire = createRequire(import.meta.url);
-const WEBP_DECODER_WASM = '@jsquash/webp/codec/dec/webp_dec.wasm';
-const WEBP_ENCODER_WASM = '@jsquash/webp/codec/enc/webp_enc.wasm';
-
-const wasmInitializations = new Map();
-
-function ensureWasm(name, init, wasmPath) {
-  if (!wasmInitializations.has(name)) {
-    wasmInitializations.set(
-      name,
-      (async () => {
-        await init(await WebAssembly.compile(readFileSync(nodeRequire.resolve(wasmPath))));
-      })()
-    );
-  }
-  return wasmInitializations.get(name);
-}
-
-function ensureWebpDecoder() {
-  return ensureWasm('webp-decoder', initWebpDecoder, WEBP_DECODER_WASM);
-}
-
-function ensureWebpEncoder() {
-  return ensureWasm('webp-encoder', initWebpEncoder, WEBP_ENCODER_WASM);
-}
-
-function isWebp(buffer) {
-  return buffer.length >= 12 && buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP';
-}
-
-function toPreview(buffer, mimeType) {
-  return { data: Buffer.from(buffer).toString('base64'), mimeType };
-}
-
-async function decodeWebpToBitmap(buffer) {
-  await ensureWebpDecoder();
-  const result = await decodeWebp(new Uint8Array(buffer).buffer);
-  return {
-    data: Buffer.from(new Uint8Array(result.data.buffer, result.data.byteOffset, result.data.byteLength)),
-    width: result.width,
-    height: result.height,
-  };
-}
-
 /**
- * Decode an image buffer into a Jimp instance. OpenRouter returns WebP for some
- * models regardless of the requested output_format, and Jimp has no built-in
- * WebP decoder, so WebP is decoded via @jsquash/webp (WASM) and loaded with
- * Jimp.fromBitmap. Other formats use Jimp's built-in decoders.
+ * Format the OpenRouter response as text URLs only. Any inline b64_json is
+ * intentionally discarded so image bytes never enter the conversation.
  */
-async function readImage(buffer) {
-  if (isWebp(buffer)) {
-    return Jimp.fromBitmap(await decodeWebpToBitmap(buffer));
-  }
-  return Jimp.read(buffer);
-}
-
-function downsizeToShorterSide(image, target) {
-  const shorter = Math.min(image.width, image.height);
-  if (shorter <= target) return image;
-  image.resize(image.width <= image.height ? { w: target } : { h: target });
-  return image;
-}
-
-async function encodeWebpPreview(image) {
-  await ensureWebpEncoder();
-  const { data, width, height } = image.bitmap;
-  const encoded = await encodeWebp(
-    { data: new Uint8ClampedArray(data.buffer, data.byteOffset, data.byteLength), width, height },
-    { quality: PREVIEW_QUALITY }
-  );
-  return toPreview(encoded, 'image/webp');
-}
-
-/**
- * Fetch an OpenRouter image URL and produce a downsized base64 preview.
- * The shorter side is resized to DOWNLOAD_SHORTER_SIDE px (aspect preserved)
- * and re-encoded as WebP (small, supports alpha). Falls back to PNG if WebP
- * encoding fails. Returns { data, mimeType } or null on any fetch/decode/encode
- * error so the caller can fall back to URL text only.
- */
-async function fetchAndDownsizeImage(url, { timeoutMs, log = () => {} } = {}) {
-  const startedAt = Date.now();
-  const downloadTimeout = Math.min(timeoutMs ?? DOWNLOAD_TIMEOUT_MS, DOWNLOAD_TIMEOUT_MS);
-  try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(downloadTimeout) });
-    if (!response.ok) {
-      log(`preview FAILED in ${Date.now() - startedAt}ms: HTTP ${response.status}`);
-      return null;
-    }
-    const buffer = Buffer.from(await response.arrayBuffer());
-    const image = downsizeToShorterSide(await readImage(buffer), DOWNLOAD_SHORTER_SIDE);
-    let preview;
-    try {
-      preview = await encodeWebpPreview(image);
-    } catch (error) {
-      preview = toPreview(await image.getBuffer('image/png'), 'image/png');
-      log(`webp encode failed (${error?.message || String(error)}); used PNG fallback`);
-    }
-    log(
-      `preview OK in ${Date.now() - startedAt}ms: ${image.width}x${image.height} ` +
-        `${preview.mimeType} b64Chars=${preview.data.length}`
-    );
-    return preview;
-  } catch (error) {
-    log(`preview FAILED in ${Date.now() - startedAt}ms: ${error?.message || String(error)}`);
-    return null;
-  }
-}
-
-async function formatResult(data, { model, config }) {
+function formatResult(data, { model, config }) {
   const images = Array.isArray(data.data) ? data.data : [];
+  const urls = [];
 
-  const entries = images.map((image, index) => {
-    if (!image || typeof image !== 'object' || Array.isArray(image)) {
-      return { error: `Image ${index + 1}: OpenRouter returned an invalid image entry.` };
-    }
-    const hasB64 = typeof image.b64_json === 'string' && image.b64_json.length > 0;
-    const hasUrl = typeof image.url === 'string' && image.url.length > 0;
-    if (!hasB64 && !hasUrl) {
-      return { error: `Image ${index + 1}: OpenRouter returned no b64_json or url.` };
-    }
-    return { image, index, hasB64, hasUrl };
+  images.forEach((image, index) => {
+    const valid = image && typeof image === 'object' && !Array.isArray(image);
+    const hasUrl = valid && typeof image.url === 'string' && image.url.length > 0;
+    const hasB64 = valid && typeof image.b64_json === 'string' && image.b64_json.length > 0;
+    logInfo(
+      config,
+      `image ${index + 1}: url=${hasUrl ? 'yes' : 'no'} b64=${hasB64 ? 'yes' : 'no'}${hasB64 ? ' (discarded)' : ''}`
+    );
+    if (hasUrl) urls.push(image.url);
   });
 
-  const invalid = entries.find((entry) => entry.error);
-  if (invalid) return errorResult(invalid.error);
-
-  // Every URL is listed up front in the leading text block so it is always
-  // delivered and clearly separated from the inline preview image blocks.
-  const urlLines = entries.map((entry) =>
-    entry.hasUrl
-      ? `Full-quality URL ${entry.index + 1}: ${entry.image.url}`
-      : `Full-quality URL ${entry.index + 1}: not provided (only the inline image is available)`
-  );
+  if (urls.length === 0) {
+    return errorResult('OpenRouter returned no image URL.');
+  }
 
   const summary = {
     model,
@@ -454,43 +334,17 @@ async function formatResult(data, { model, config }) {
     usage: data.usage,
   };
 
-  const header = [
-    `Generated ${images.length} image(s) with ${model}.`,
+  const urlLines = urls.map((url, index) => `${index + 1}. ${url}`);
+  const text = [
+    `Generated ${urls.length} image URL(s) with ${model}.`,
     '',
-    'The inline image block(s) below are for display only. When a full-quality URL is ' +
-      'listed below, use it to get the actual image — the inline image may be a downsized preview:',
-    '',
-    urlLines.join('\n'),
+    'Image URLs (full quality):',
+    ...urlLines,
     '',
     JSON.stringify(summary, null, 2),
   ].join('\n');
 
-  const content = [{ type: 'text', text: header }];
-
-  for (const entry of entries) {
-    const { image, index, hasB64, hasUrl } = entry;
-    logInfo(config, `image ${index + 1}: url=${hasUrl ? 'yes' : 'no'} b64=${hasB64 ? 'yes' : 'no'}`);
-
-    // OpenRouter-supplied b64_json is passed through as-is (no downsizing). A
-    // downsized ~768px preview is only synthesized when OpenRouter omits b64_json
-    // and returns a URL instead.
-    if (hasB64) {
-      const mimeType = typeof image.media_type === 'string' ? image.media_type : 'image/png';
-      content.push({ type: 'text', text: `Inline image ${index + 1} (as returned by OpenRouter):` });
-      content.push({ type: 'image', data: image.b64_json, mimeType });
-    } else if (hasUrl) {
-      const synthesized = await fetchAndDownsizeImage(image.url, {
-        timeoutMs: config.openRouterTimeoutMs,
-        log: (message) => logInfo(config, `image ${index + 1}: ${message}`),
-      });
-      if (synthesized) {
-        content.push({ type: 'text', text: `Preview ${index + 1} (downsized, not the full-quality image):` });
-        content.push({ type: 'image', data: synthesized.data, mimeType: synthesized.mimeType });
-      }
-    }
-  }
-
-  return { content };
+  return { content: [{ type: 'text', text }] };
 }
 
 async function handleGenerateImage(args, { apiKey, config }) {
@@ -498,7 +352,7 @@ async function handleGenerateImage(args, { apiKey, config }) {
     logInfo(config, 'rejected: missing OpenRouter API key');
     return errorResult(
       'No OpenRouter API key was provided. Configure this MCP server in LibreChat with ' +
-        'apiKey.source: user and authorization_type: bearer so each request carries ' +
+        'customUserVars for OPENROUTER_API_KEY so each request carries ' +
         'Authorization: Bearer <OPENROUTER_API_KEY>.'
     );
   }
@@ -522,7 +376,7 @@ async function handleGenerateImage(args, { apiKey, config }) {
     const data = await callOpenRouter({ apiKey, body: request, config });
     const imageCount = Array.isArray(data.data) ? data.data.length : 0;
     logInfo(config, `openrouter responded in ${Date.now() - openRouterStarted}ms: ${imageCount} image(s)`);
-    const result = await formatResult(data, { model: request.model, config });
+    const result = formatResult(data, { model: request.model, config });
     logInfo(config, `completed in ${Date.now() - startedAt}ms`);
     return result;
   } catch (error) {
@@ -557,8 +411,7 @@ export function buildTool(config) {
     title: 'Generate image',
     description:
       'Generate an image from a text prompt using OpenRouter image models. ' +
-      'Returns the full-quality image URL(s) as text plus, for display, downsized inline preview(s). ' +
-      'The URL points to the actual full-quality image; the inline image is only a preview.',
+      'Returns the full-quality image URL(s) as text only; image data is never embedded in the response.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -625,6 +478,7 @@ export function createMcpServer({ apiKey, config }) {
       capabilities: { tools: {} },
       instructions:
         'Use generate_image to create images with OpenRouter image models. ' +
+        'The tool returns image URLs as text; share the URL instead of embedding or repeating image data. ' +
         'The OpenRouter API key is supplied per request through the Authorization header.',
     }
   );

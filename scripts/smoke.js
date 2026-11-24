@@ -37,22 +37,13 @@ try {
     arguments: { prompt: 'A tiny red square' },
   });
   if (result.isError) throw new Error(`generate_image returned an error: ${result.content?.[0]?.text}`);
-  const image = result.content?.find((item) => item.type === 'image');
-  if (!image?.data) throw new Error('generate_image did not return image content');
+  if (result.content?.some((item) => item.type === 'image')) {
+    throw new Error('generate_image returned inline image data (expected text URLs only)');
+  }
   if (!result.content?.some((item) => item.type === 'text' && item.text.includes('https://'))) {
     throw new Error('generate_image did not return a URL');
   }
-  ok('generate_image returned base64 image content and URL text');
-
-  const urlResult = await client.callTool({
-    name: 'generate_image',
-    arguments: { prompt: 'A tiny blue square' },
-  });
-  if (urlResult.isError) throw new Error(`generate_image returned an error: ${urlResult.content?.[0]?.text}`);
-  if (!urlResult.content?.some((item) => item.type === 'text' && item.text.includes('https://'))) {
-    throw new Error('generate_image did not return a URL');
-  }
-  ok('generate_image returned URL text');
+  ok('generate_image returned URL text only');
 } finally {
   await client.close();
 }
