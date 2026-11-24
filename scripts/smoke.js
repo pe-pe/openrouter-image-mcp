@@ -34,20 +34,23 @@ try {
 
   const result = await client.callTool({
     name: 'generate_image',
-    arguments: { prompt: 'A tiny red square', response_format: 'b64_json' },
+    arguments: { prompt: 'A tiny red square' },
   });
   if (result.isError) throw new Error(`generate_image returned an error: ${result.content?.[0]?.text}`);
   const image = result.content?.find((item) => item.type === 'image');
   if (!image?.data) throw new Error('generate_image did not return image content');
-  ok('generate_image returned base64 image content');
+  if (!result.content?.some((item) => item.type === 'text' && item.text.includes('https://'))) {
+    throw new Error('generate_image did not return a URL');
+  }
+  ok('generate_image returned base64 image content and URL text');
 
   const urlResult = await client.callTool({
     name: 'generate_image',
-    arguments: { prompt: 'A tiny blue square', response_format: 'url' },
+    arguments: { prompt: 'A tiny blue square' },
   });
-  if (urlResult.isError) throw new Error(`url generate_image returned an error: ${urlResult.content?.[0]?.text}`);
+  if (urlResult.isError) throw new Error(`generate_image returned an error: ${urlResult.content?.[0]?.text}`);
   if (!urlResult.content?.some((item) => item.type === 'text' && item.text.includes('https://'))) {
-    throw new Error('url generate_image did not return a URL');
+    throw new Error('generate_image did not return a URL');
   }
   ok('generate_image returned URL text');
 } finally {

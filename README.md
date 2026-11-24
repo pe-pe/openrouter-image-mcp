@@ -27,9 +27,7 @@ bills to that user's own OpenRouter account. The key is never written to disk.
 2. The server extracts the key for that request only. It does not keep a session
    key map and does not log the key.
 3. `generate_image` validates the arguments and forwards them to OpenRouter's
-   Images API.
-4. OpenRouter returns base64 image data or a temporary URL. The server returns
-   MCP `image` content for base64 results and text URLs for URL results.
+   Images API, always requesting `response_format: url` so the direct full-quality URL is available.
 
 The server is stateless: each MCP request creates its own server and transport
 instance. That keeps per-user keys isolated and makes horizontal scaling simple.
@@ -165,18 +163,17 @@ Per-user headers always take precedence over the environment fallback.
 
 `generate_image` accepts:
 
-| Parameter         | Type    | Default                              | Notes                                                                                                 |
-| ----------------- | ------- | ------------------------------------ | ----------------------------------------------------------------------------------------------------- |
-| `prompt`          | string  | required                             | Text description of the image                                                                         |
-| `model`           | string  | `recraft/recraft-v4.1-flash-v2:free` | Any OpenRouter image model slug                                                                       |
-| `aspect_ratio`    | string  | `auto`                               | `auto`, `1:1`, `1:2`, `2:1`, `2:3`, `3:2`, `3:4`, `4:3`, `4:5`, `5:4`, `9:16`, `16:9`, `9:21`, `21:9` |
-| `resolution`      | string  | unset                                | `1K`, `1.5K`, `2K`, `4K`                                                                              |
-| `size`            | string  | unset                                | Tier such as `2K` or pixels such as `2048x2048`; do not combine with `aspect_ratio` or `resolution`   |
-| `n`               | integer | `1`                                  | 1-10; provider limits may be lower                                                                    |
-| `output_format`   | string  | `png`                                | `png`, `jpeg`, `webp`, `svg`, `gif`                                                                   |
-| `background`      | string  | unset                                | `auto`, `transparent`, `opaque`                                                                       |
-| `seed`            | integer | unset                                | Reproducibility where the model supports it                                                           |
-| `response_format` | string  | `b64_json`                           | `b64_json` returns MCP image content; `url` returns URLs                                              |
+| Parameter       | Type    | Default                              | Notes                                                                                                 |
+| --------------- | ------- | ------------------------------------ | ----------------------------------------------------------------------------------------------------- |
+| `prompt`        | string  | required                             | Text description of the image                                                                         |
+| `model`         | string  | `recraft/recraft-v4.1-flash-v2:free` | Any OpenRouter image model slug                                                                       |
+| `aspect_ratio`  | string  | `auto`                               | `auto`, `1:1`, `1:2`, `2:1`, `2:3`, `3:2`, `3:4`, `4:3`, `4:5`, `5:4`, `9:16`, `16:9`, `9:21`, `21:9` |
+| `resolution`    | string  | unset                                | `1K`, `1.5K`, `2K`, `4K`                                                                              |
+| `size`          | string  | unset                                | Tier such as `2K` or pixels such as `2048x2048`; do not combine with `aspect_ratio` or `resolution`   |
+| `n`             | integer | `1`                                  | 1-10; provider limits may be lower                                                                    |
+| `output_format` | string  | `png`                                | `png`, `jpeg`, `webp`, `svg`, `gif`                                                                   |
+| `background`    | string  | unset                                | `auto`, `transparent`, `opaque`                                                                       |
+| `seed`          | integer | unset                                | Reproducibility where the model supports it                                                           |
 
 Example call from an MCP client:
 
@@ -187,14 +184,17 @@ Example call from an MCP client:
     "prompt": "A red panda wearing a tiny astronaut helmet, studio lighting",
     "model": "recraft/recraft-v4.1-flash-v2:free",
     "aspect_ratio": "16:9",
-    "resolution": "2K",
-    "response_format": "b64_json"
+    "resolution": "2K"
   }
 }
 ```
 
-`b64_json` is the default because LibreChat can display the returned MCP image
-content directly. Use `url` when you want a temporary OpenRouter URL instead.
+The server always requests `response_format: url` from OpenRouter so the direct full-quality URL is available, then returns:
+
+- an inline MCP `image` block with a base64 preview: OpenRouter's `b64_json` is returned as-is when present; when OpenRouter only returns a URL, the server fetches it and synthesizes a preview downsized to ~768px on the shorter side (aspect preserved, re-encoded using OpenRouter `media_type` or PNG), and
+- a text line with the direct OpenRouter URL for full-quality download (omitted when OpenRouter returns no URL).
+
+If OpenRouter returns only `b64_json`, the URL text is omitted. If it returns neither, the tool returns an error.
 
 ## Models
 
@@ -312,14 +312,15 @@ mock on `127.0.0.1:4010`. No real OpenRouter key is used in CI.
 
 ## Troubleshooting
 
-| Symptom                              | Fix                                                                                 |
-| ------------------------------------ | ----------------------------------------------------------------------------------- |
-| `No OpenRouter API key was provided` | Configure `apiKey.source: user` in LibreChat or send `Authorization: Bearer <key>`  |
-| `401` from OpenRouter                | The user's key is invalid or revoked                                                |
-| `402` from OpenRouter                | The user's OpenRouter account has insufficient credits                              |
-| `429` from OpenRouter                | Rate limit reached; retry later                                                     |
-| LibreChat cannot reach the server    | Use the Docker service name and allow the address in `mcpSettings.allowedAddresses` |
-| `size` and `aspect_ratio` conflict   | Use either `size` or `aspect_ratio`/`resolution`, not both                          |
+| Symptom                              | Fix                                                                                                                                                  |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `No OpenRouter API key was provided` | Configure `apiKey.source: user` in LibreChat or send `Authorization: Bearer <key>`                                                                   |
+| `401` from OpenRouter                | The user's key is invalid or revoked                                                                                                                 |
+| `402` from OpenRouter                | The user's OpenRouter account has insufficient credits                                                                                               |
+| `429` from OpenRouter                | Rate limit reached; retry later                                                                                                                      |
+| LibreChat cannot reach the server    | Use the Docker service name and allow the address in `mcpSettings.allowedAddresses`                                                                  |
+| `size` and `aspect_ratio` conflict   | Use either `size` or `aspect_ratio`/`resolution`, not both                                                                                           |
+| Inline preview is small/low quality  | The inline `image` block is a deliberate ~768px shorter-side downsized preview for chat display; the accompanying URL text is the full-quality image |
 
 ## License
 

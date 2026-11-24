@@ -1,12 +1,15 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { createMockOpenRouter } from '../scripts/mock-openrouter.js';
+import { createMockOpenRouter, TINY_PNG_BASE64 } from '../scripts/mock-openrouter.js';
 import { loadConfig, startServer } from '../server.js';
 
 let mock;
 let mcp;
+let imageServer;
+let imageUrl;
 let config;
 
 before(async () => {
@@ -22,11 +25,22 @@ before(async () => {
     LOG_REQUESTS: 'false',
   });
   mcp = await startServer(config);
+
+  const pngBuffer = Buffer.from(TINY_PNG_BASE64, 'base64');
+  imageServer = createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'image/png' });
+    res.end(pngBuffer);
+  });
+  await new Promise((resolve) => imageServer.listen(0, '127.0.0.1', resolve));
+  const address = imageServer.address();
+  const port = typeof address === 'object' && address ? address.port : 0;
+  imageUrl = `http://127.0.0.1:${port}/image.png`;
 });
 
 after(async () => {
   await mcp?.close();
   await mock?.close();
+  await new Promise((resolve) => imageServer?.close(resolve));
 });
 
 async function connect(apiKey) {
@@ -100,7 +114,13 @@ test('generate_image returns b64 image content and forwards the per-request key'
     assert.equal(mock.requests[0].authorization, 'Bearer test-key');
     assert.equal(mock.requests[0].body.model, 'recraft/recraft-v4.1-flash-v2:free');
     assert.equal(mock.requests[0].body.prompt, 'A red panda');
-    assert.equal(mock.requests[0].body.response_format, 'b64_json');
+    assert.equal(mock.requests[0].body.response_format, 'url');
+    assert.ok(
+      result.content.some(
+        (item) => item.type === 'text' && item.text.includes('https://example.com/generated-image.png')
+      ),
+      'expected URL text in content when OpenRouter returns both fields'
+    );
   } finally {
     await client.close();
   }
@@ -194,20 +214,97 @@ test('OpenRouter errors are surfaced as tool errors', async () => {
   }
 });
 
-test('url response format returns URLs', async () => {
-  mock.setResponse(undefined);
+test('synthesizes base64 preview when OpenRouter returns url-only', async () => {
+  mock.setResponse(() => ({
+    status: 200,
+    body: {
+      created: Math.floor(Date.now() / 1000),
+      data: [{ url: imageUrl, media_type: 'image/png' }],
+      usage: { cost: 0.001 },
+    },
+  }));
+  mock.requests.length = 0;
+  const { client } = await connect('test-key');
+  try {
+    const result = await client.callTool({
+      name: 'generate_image',
+      arguments: { prompt: 'x', n: 1 },
+    });
+    assert.equal(result.isError, undefined);
+    const image = result.content.find((item) => item.type === 'image');
+    assert.ok(image, 'expected synthesized image block from URL');
+    assert.equal(image.mimeType, 'image/png');
+    assert.ok(image.data.length > 0);
+    assert.ok(
+      result.content.some((item) => item.type === 'text' && item.text.includes(imageUrl)),
+      'expected URL text in content'
+    );
+    assert.equal(mock.requests[0].body.response_format, 'url');
+  } finally {
+    await client.close();
+    mock.setResponse(undefined);
+  }
+});
+
+test('returns image block only when OpenRouter returns b64_json without url', async () => {
+  mock.setResponse(() => ({
+    status: 200,
+    body: {
+      created: Math.floor(Date.now() / 1000),
+      data: [{ b64_json: TINY_PNG_BASE64, media_type: 'image/png' }],
+      usage: { cost: 0.001 },
+    },
+  }));
+  mock.requests.length = 0;
+  const { client } = await connect('test-key');
+  try {
+    const result = await client.callTool({
+      name: 'generate_image',
+      arguments: { prompt: 'x' },
+    });
+    assert.equal(result.isError, undefined);
+    const image = result.content.find((item) => item.type === 'image');
+    assert.ok(image);
+    assert.equal(image.mimeType, 'image/png');
+    assert.ok(
+      result.content.every((item) => item.type !== 'text' || !item.text.includes('http')),
+      'expected no URL text when OpenRouter returns b64_json only'
+    );
+  } finally {
+    await client.close();
+    mock.setResponse(undefined);
+  }
+});
+
+test('returns tool error when OpenRouter returns neither b64_json nor url', async () => {
+  mock.setResponse(() => ({
+    status: 200,
+    body: {
+      created: Math.floor(Date.now() / 1000),
+      data: [{}],
+      usage: { cost: 0.001 },
+    },
+  }));
+  const { client } = await connect('test-key');
+  try {
+    const result = await client.callTool({ name: 'generate_image', arguments: { prompt: 'x' } });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /no b64_json or url/);
+  } finally {
+    await client.close();
+    mock.setResponse(undefined);
+  }
+});
+
+test('response_format argument is rejected as unknown', async () => {
   const { client } = await connect('test-key');
   try {
     const result = await client.callTool({
       name: 'generate_image',
       arguments: { prompt: 'x', response_format: 'url' },
     });
-    assert.equal(result.isError, undefined);
-    assert.ok(
-      result.content.some(
-        (item) => item.type === 'text' && item.text.includes('https://example.com/generated-image.png')
-      )
-    );
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /Unknown argument: response_format/);
   } finally {
     await client.close();
   }

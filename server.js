@@ -4,6 +4,7 @@ import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } fr
 import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { Jimp } from 'jimp';
 
 // ---------------------------------------------------------------------------
 // OpenRouter Image Generation MCP Server (Streamable HTTP)
@@ -19,9 +20,9 @@ import { pathToFileURL } from 'node:url';
 const TOOL_NAME = 'generate_image';
 const DEFAULT_ASPECT_RATIO = 'auto';
 const DEFAULT_OUTPUT_FORMAT = 'png';
-const DEFAULT_RESPONSE_FORMAT = 'b64_json';
 const DEFAULT_IMAGE_MODEL = 'recraft/recraft-v4.1-flash-v2:free';
 const MAX_ERROR_TEXT = 800;
+const DOWNLOAD_SHORTER_SIDE = 768;
 
 const ASPECT_RATIOS = [
   'auto',
@@ -42,7 +43,6 @@ const ASPECT_RATIOS = [
 const RESOLUTIONS = ['1K', '1.5K', '2K', '4K'];
 const OUTPUT_FORMATS = ['png', 'jpeg', 'webp', 'svg', 'gif'];
 const BACKGROUNDS = ['auto', 'transparent', 'opaque'];
-const RESPONSE_FORMATS = ['b64_json', 'url'];
 const ALLOWED_ARG_KEYS = new Set([
   'prompt',
   'model',
@@ -53,7 +53,6 @@ const ALLOWED_ARG_KEYS = new Set([
   'output_format',
   'background',
   'seed',
-  'response_format',
 ]);
 
 const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
@@ -201,17 +200,12 @@ export function validateGenerateArgs(args, config) {
     throw new Error('seed must be an integer');
   }
 
-  const responseFormat = args.response_format === undefined ? DEFAULT_RESPONSE_FORMAT : args.response_format;
-  if (!RESPONSE_FORMATS.includes(responseFormat)) {
-    throw new Error(`response_format must be one of: ${RESPONSE_FORMATS.join(', ')}`);
-  }
-
   const request = {
     model: model.trim(),
     prompt: args.prompt.trim(),
     n,
     output_format: outputFormat,
-    response_format: responseFormat,
+    response_format: 'url',
   };
   if (aspectRatio !== undefined) request.aspect_ratio = aspectRatio;
   if (resolution !== undefined) request.resolution = resolution;
@@ -307,11 +301,38 @@ function errorResult(message) {
   };
 }
 
-function formatResult(data, { model, responseFormat }) {
+/**
+ * Fetch an OpenRouter image URL and produce a downsized base64 preview.
+ * The shorter side is resized to DOWNLOAD_SHORTER_SIDE px (aspect preserved)
+ * and the image is re-encoded using `mimeType` (default image/png).
+ * Returns null on any fetch/decode/encode error so the caller can fall back
+ * to URL text only instead of failing generation.
+ */
+async function fetchAndDownsizeImage(url, { mimeType = 'image/png', timeoutMs } = {}) {
+  try {
+    const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!response.ok) return null;
+    const buffer = Buffer.from(await response.arrayBuffer());
+    const image = await Jimp.read(buffer);
+    const shorter = Math.min(image.width, image.height);
+    if (shorter > DOWNLOAD_SHORTER_SIDE) {
+      if (image.width <= image.height) {
+        image.resize({ w: DOWNLOAD_SHORTER_SIDE });
+      } else {
+        image.resize({ h: DOWNLOAD_SHORTER_SIDE });
+      }
+    }
+    const encoded = await image.getBuffer(mimeType);
+    return encoded.toString('base64');
+  } catch {
+    return null;
+  }
+}
+
+async function formatResult(data, { model, config }) {
   const images = Array.isArray(data.data) ? data.data : [];
   const summary = {
     model,
-    response_format: responseFormat,
     images: images.length,
     created: data.created,
     expires_at: data.expires_at,
@@ -324,17 +345,36 @@ function formatResult(data, { model, responseFormat }) {
     },
   ];
 
-  images.forEach((image, index) => {
-    if (image && typeof image.b64_json === 'string' && image.b64_json.length > 0) {
-      const mimeType = typeof image.media_type === 'string' ? image.media_type : 'image/png';
+  for (let index = 0; index < images.length; index += 1) {
+    const image = images[index];
+    if (!image || typeof image !== 'object' || Array.isArray(image)) {
+      return errorResult(`Image ${index + 1}: OpenRouter returned an invalid image entry.`);
+    }
+    const hasB64 = typeof image.b64_json === 'string' && image.b64_json.length > 0;
+    const hasUrl = typeof image.url === 'string' && image.url.length > 0;
+    const mimeType = typeof image.media_type === 'string' ? image.media_type : 'image/png';
+
+    // OpenRouter-supplied b64_json is passed through as-is (no downsizing). A
+    // downsized ~768px preview is only synthesized when OpenRouter omits b64_json
+    // and returns a URL instead.
+    if (hasB64) {
       content.push({ type: 'image', data: image.b64_json, mimeType });
-      content.push({ type: 'text', text: `Image ${index + 1}: ${mimeType}` });
-    } else if (image && typeof image.url === 'string' && image.url.length > 0) {
+      if (hasUrl) {
+        content.push({ type: 'text', text: `Image ${index + 1}: ${image.url}` });
+      }
+    } else if (hasUrl) {
+      const synthesized = await fetchAndDownsizeImage(image.url, {
+        mimeType,
+        timeoutMs: config.openRouterTimeoutMs,
+      });
+      if (synthesized) {
+        content.push({ type: 'image', data: synthesized, mimeType });
+      }
       content.push({ type: 'text', text: `Image ${index + 1}: ${image.url}` });
     } else {
-      content.push({ type: 'text', text: `Image ${index + 1}: OpenRouter returned no b64_json or url.` });
+      return errorResult(`Image ${index + 1}: OpenRouter returned no b64_json or url.`);
     }
-  });
+  }
 
   return { content };
 }
@@ -357,7 +397,7 @@ async function handleGenerateImage(args, { apiKey, config }) {
 
   try {
     const data = await callOpenRouter({ apiKey, body: request, config });
-    return formatResult(data, { model: request.model, responseFormat: request.response_format });
+    return formatResult(data, { model: request.model, config });
   } catch (error) {
     if (error instanceof OpenRouterError) {
       let hint = '';
@@ -387,7 +427,8 @@ export function buildTool(config) {
     title: 'Generate image',
     description:
       'Generate an image from a text prompt using OpenRouter image models. ' +
-      'Returns MCP image content when response_format is b64_json, or URLs when response_format is url.',
+      'Always returns the direct OpenRouter URL plus an inline MCP image preview ' +
+      '(downsized to ~768px on the shorter side) derived from the response.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -439,12 +480,6 @@ export function buildTool(config) {
         seed: {
           type: 'integer',
           description: 'Optional seed for reproducibility, when supported by the model.',
-        },
-        response_format: {
-          type: 'string',
-          description: 'Return base64 image data (b64_json) or a temporary URL (url).',
-          enum: RESPONSE_FORMATS,
-          default: DEFAULT_RESPONSE_FORMAT,
         },
       },
       required: ['prompt'],

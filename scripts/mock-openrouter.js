@@ -30,11 +30,13 @@ function readJsonBody(req, limit = 1_000_000) {
   });
 }
 
-function defaultResponse(body) {
-  const useUrl = body?.response_format === 'url';
-  const image = useUrl
-    ? { url: 'https://example.com/generated-image.png', expires_at: Math.floor(Date.now() / 1000) + 86400 }
-    : { b64_json: TINY_PNG_BASE64, media_type: 'image/png' };
+function defaultResponse() {
+  const image = {
+    url: 'https://example.com/generated-image.png',
+    b64_json: TINY_PNG_BASE64,
+    media_type: 'image/png',
+    expires_at: Math.floor(Date.now() / 1000) + 86400,
+  };
 
   return {
     status: 200,
