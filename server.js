@@ -334,11 +334,12 @@ function formatResult(data, { model, config }) {
     usage: data.usage,
   };
 
-  const urlLines = urls.map((url, index) => `${index + 1}. ${url}`);
+  const urlLines = urls.map((url, index) => `${index + 1}. ${url}\n   ![generated image](${url})`);
   const text = [
     `Generated ${urls.length} image URL(s) with ${model}.`,
     '',
-    'Image URLs (full quality):',
+    'Show each image to the user as a Markdown image (renders a preview) and keep the plain URL visible:',
+    '',
     ...urlLines,
     '',
     JSON.stringify(summary, null, 2),
@@ -411,7 +412,8 @@ export function buildTool(config) {
     title: 'Generate image',
     description:
       'Generate an image from a text prompt using OpenRouter image models. ' +
-      'Returns the full-quality image URL(s) as text only; image data is never embedded in the response.',
+      'Returns the full-quality image URL(s) as text only (image data is never embedded). ' +
+      'Present each result as a Markdown image (![generated image](URL)) plus the plain URL.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -478,7 +480,8 @@ export function createMcpServer({ apiKey, config }) {
       capabilities: { tools: {} },
       instructions:
         'Use generate_image to create images with OpenRouter image models. ' +
-        'The tool returns image URLs as text; share the URL instead of embedding or repeating image data. ' +
+        'The tool returns image URLs as text; present each image to the user as a Markdown image ' +
+        '(![generated image](URL)) plus the plain URL. ' +
         'The OpenRouter API key is supplied per request through the Authorization header.',
     }
   );

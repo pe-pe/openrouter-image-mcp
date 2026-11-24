@@ -161,7 +161,9 @@ Example call from an MCP client:
 }
 ```
 
-The server always requests `response_format: url` from OpenRouter. The tool result is text only: a `Generated N image URL(s)…` line, then `Image URLs (full quality):` with one numbered URL per image, then the usage summary. Any `b64_json` returned by OpenRouter is discarded.
+The server always requests `response_format: url` from OpenRouter. The tool result is text only: a `Generated N image URL(s)…` line, then each image as a numbered plain URL plus a matching Markdown image (`![generated image](URL)`) so it renders as a preview, then the usage summary. Any `b64_json` returned by OpenRouter is discarded.
+
+The tool result, tool description, and server instructions all tell the model to present each image as **both** a Markdown image (preview) and the plain URL. To enforce the same rule globally in LibreChat, add a custom instruction such as: _"When a tool returns image URLs, show each one as both `![generated image](URL)` and the plain URL."_
 
 If OpenRouter returns no URL, the tool returns an error.
 

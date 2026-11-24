@@ -108,6 +108,13 @@ test('generate_image returns the image URL and forwards the per-request key', as
       ),
       'expected URL text in content when OpenRouter returns both fields'
     );
+    assert.ok(
+      result.content.some(
+        (item) =>
+          item.type === 'text' && item.text.includes('![generated image](https://example.com/generated-image.png)')
+      ),
+      'expected Markdown image form in content'
+    );
   } finally {
     await client.close();
   }
