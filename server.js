@@ -27,6 +27,7 @@ const DEFAULT_IMAGE_MODEL = 'recraft/recraft-v4.1-flash-v2:free';
 const MAX_ERROR_TEXT = 800;
 const DOWNLOAD_SHORTER_SIDE = 768;
 const PREVIEW_QUALITY = 82;
+const DOWNLOAD_TIMEOUT_MS = 30000;
 
 const ASPECT_RATIOS = [
   'auto',
@@ -305,6 +306,10 @@ function errorResult(message) {
   };
 }
 
+function logInfo(config, message) {
+  if (config.logRequests) console.log(`[generate_image] ${message}`);
+}
+
 const nodeRequire = createRequire(import.meta.url);
 const WEBP_DECODER_WASM = '@jsquash/webp/codec/dec/webp_dec.wasm';
 const WEBP_ENCODER_WASM = '@jsquash/webp/codec/enc/webp_enc.wasm';
@@ -386,19 +391,31 @@ async function encodeWebpPreview(image) {
  * encoding fails. Returns { data, mimeType } or null on any fetch/decode/encode
  * error so the caller can fall back to URL text only.
  */
-async function fetchAndDownsizeImage(url, { timeoutMs } = {}) {
+async function fetchAndDownsizeImage(url, { timeoutMs, log = () => {} } = {}) {
+  const startedAt = Date.now();
+  const downloadTimeout = Math.min(timeoutMs ?? DOWNLOAD_TIMEOUT_MS, DOWNLOAD_TIMEOUT_MS);
   try {
-    const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
-    if (!response.ok) return null;
+    const response = await fetch(url, { signal: AbortSignal.timeout(downloadTimeout) });
+    if (!response.ok) {
+      log(`preview FAILED in ${Date.now() - startedAt}ms: HTTP ${response.status}`);
+      return null;
+    }
     const buffer = Buffer.from(await response.arrayBuffer());
     const image = downsizeToShorterSide(await readImage(buffer), DOWNLOAD_SHORTER_SIDE);
+    let preview;
     try {
-      return await encodeWebpPreview(image);
-    } catch {
-      return toPreview(await image.getBuffer('image/png'), 'image/png');
+      preview = await encodeWebpPreview(image);
+    } catch (error) {
+      preview = toPreview(await image.getBuffer('image/png'), 'image/png');
+      log(`webp encode failed (${error?.message || String(error)}); used PNG fallback`);
     }
+    log(
+      `preview OK in ${Date.now() - startedAt}ms: ${image.width}x${image.height} ` +
+        `${preview.mimeType} b64Chars=${preview.data.length}`
+    );
+    return preview;
   } catch (error) {
-    console.error('[fetchAndDownsizeImage] failed:', error?.message || String(error));
+    log(`preview FAILED in ${Date.now() - startedAt}ms: ${error?.message || String(error)}`);
     return null;
   }
 }
@@ -426,6 +443,7 @@ async function formatResult(data, { model, config }) {
     }
     const hasB64 = typeof image.b64_json === 'string' && image.b64_json.length > 0;
     const hasUrl = typeof image.url === 'string' && image.url.length > 0;
+    logInfo(config, `image ${index + 1}: url=${hasUrl ? 'yes' : 'no'} b64=${hasB64 ? 'yes' : 'no'}`);
 
     // OpenRouter-supplied b64_json is passed through as-is (no downsizing). A
     // downsized ~768px preview is only synthesized when OpenRouter omits b64_json
@@ -439,6 +457,7 @@ async function formatResult(data, { model, config }) {
     } else if (hasUrl) {
       const synthesized = await fetchAndDownsizeImage(image.url, {
         timeoutMs: config.openRouterTimeoutMs,
+        log: (message) => logInfo(config, `image ${index + 1}: ${message}`),
       });
       if (synthesized) {
         content.push({ type: 'image', data: synthesized.data, mimeType: synthesized.mimeType });
@@ -454,6 +473,7 @@ async function formatResult(data, { model, config }) {
 
 async function handleGenerateImage(args, { apiKey, config }) {
   if (!apiKey) {
+    logInfo(config, 'rejected: missing OpenRouter API key');
     return errorResult(
       'No OpenRouter API key was provided. Configure this MCP server in LibreChat with ' +
         'apiKey.source: user and authorization_type: bearer so each request carries ' +
@@ -465,13 +485,26 @@ async function handleGenerateImage(args, { apiKey, config }) {
   try {
     request = validateGenerateArgs(args, config);
   } catch (error) {
+    logInfo(config, `rejected: ${error.message}`);
     return errorResult(error.message);
   }
 
+  const startedAt = Date.now();
+  const target = request.size
+    ? `size=${request.size}`
+    : `aspect_ratio=${request.aspect_ratio ?? 'auto'}${request.resolution ? ` resolution=${request.resolution}` : ''}`;
+  logInfo(config, `received: model=${request.model} n=${request.n} ${target} promptChars=${request.prompt.length}`);
+
   try {
+    const openRouterStarted = Date.now();
     const data = await callOpenRouter({ apiKey, body: request, config });
-    return formatResult(data, { model: request.model, config });
+    const imageCount = Array.isArray(data.data) ? data.data.length : 0;
+    logInfo(config, `openrouter responded in ${Date.now() - openRouterStarted}ms: ${imageCount} image(s)`);
+    const result = await formatResult(data, { model: request.model, config });
+    logInfo(config, `completed in ${Date.now() - startedAt}ms`);
+    return result;
   } catch (error) {
+    let failure;
     if (error instanceof OpenRouterError) {
       let hint = '';
       if (error.status === 401) {
@@ -481,12 +514,14 @@ async function handleGenerateImage(args, { apiKey, config }) {
       } else if (error.status === 429) {
         hint = ' OpenRouter rate limit reached; retry later.';
       }
-      return errorResult(`OpenRouter API error (${error.status}): ${error.message}${hint}`);
+      failure = errorResult(`OpenRouter API error (${error.status}): ${error.message}${hint}`);
+    } else if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
+      failure = errorResult(`OpenRouter request timed out after ${config.openRouterTimeoutMs} ms.`);
+    } else {
+      failure = errorResult(`Failed to reach OpenRouter: ${error?.message || String(error)}`);
     }
-    if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
-      return errorResult(`OpenRouter request timed out after ${config.openRouterTimeoutMs} ms.`);
-    }
-    return errorResult(`Failed to reach OpenRouter: ${error?.message || String(error)}`);
+    logInfo(config, `failed in ${Date.now() - startedAt}ms: ${failure.content[0].text}`);
+    return failure;
   }
 }
 

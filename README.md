@@ -191,7 +191,7 @@ Example call from an MCP client:
 
 The server always requests `response_format: url` from OpenRouter so the direct full-quality URL is available, then returns:
 
-- an inline MCP `image` block with a base64 preview: OpenRouter's `b64_json` is returned as-is when present; when OpenRouter only returns a URL, the server fetches it and synthesizes a WebP preview downsized to ~768px on the shorter side (aspect preserved; WebP is decoded via WASM and re-encoded at quality 82, falling back to PNG if WebP encoding fails), and
+- an inline MCP `image` block with a base64 preview: OpenRouter's `b64_json` is returned as-is when present; when OpenRouter only returns a URL, the server fetches it (bounded to 30s) and synthesizes a WebP preview downsized to ~768px on the shorter side (aspect preserved; WebP is decoded via WASM and re-encoded at quality 82, falling back to PNG if WebP encoding fails), and
 - a text line with the direct OpenRouter URL for full-quality download (omitted when OpenRouter returns no URL).
 
 If OpenRouter returns only `b64_json`, the URL text is omitted. If it returns neither, the tool returns an error.
@@ -217,19 +217,19 @@ list; OpenRouter validates the model and its parameters.
 
 ## Configuration
 
-| Variable                  | Default                              | Purpose                                             |
-| ------------------------- | ------------------------------------ | --------------------------------------------------- |
-| `HOST`                    | `0.0.0.0`                            | Listen address                                      |
-| `PORT`                    | `3333`                               | Listen port                                         |
-| `OPENROUTER_API_BASE_URL` | `https://openrouter.ai/api/v1`       | API base; point at the mock for tests               |
-| `OPENROUTER_API_KEY`      | empty                                | Optional admin fallback key                         |
-| `DEFAULT_IMAGE_MODEL`     | `recraft/recraft-v4.1-flash-v2:free` | Model used when `model` is omitted                  |
-| `OPENROUTER_TIMEOUT_MS`   | `120000`                             | OpenRouter request timeout                          |
-| `MAX_BODY_BYTES`          | `1000000`                            | Maximum MCP request body size                       |
-| `CORS_ORIGIN`             | empty                                | Comma-separated origins or `*`; empty disables CORS |
-| `LOG_REQUESTS`            | `true`                               | Log method, path, status, and duration only         |
-| `OPENROUTER_APP_TITLE`    | `openrouter-image-mcp`               | OpenRouter `X-Title` header                         |
-| `OPENROUTER_APP_REFERER`  | empty                                | Optional OpenRouter `HTTP-Referer` header           |
+| Variable                  | Default                              | Purpose                                                                                                                 |
+| ------------------------- | ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| `HOST`                    | `0.0.0.0`                            | Listen address                                                                                                          |
+| `PORT`                    | `3333`                               | Listen port                                                                                                             |
+| `OPENROUTER_API_BASE_URL` | `https://openrouter.ai/api/v1`       | API base; point at the mock for tests                                                                                   |
+| `OPENROUTER_API_KEY`      | empty                                | Optional admin fallback key                                                                                             |
+| `DEFAULT_IMAGE_MODEL`     | `recraft/recraft-v4.1-flash-v2:free` | Model used when `model` is omitted                                                                                      |
+| `OPENROUTER_TIMEOUT_MS`   | `120000`                             | OpenRouter request timeout                                                                                              |
+| `MAX_BODY_BYTES`          | `1000000`                            | Maximum MCP request body size                                                                                           |
+| `CORS_ORIGIN`             | empty                                | Comma-separated origins or `*`; empty disables CORS                                                                     |
+| `LOG_REQUESTS`            | `true`                               | Log HTTP requests and `generate_image` steps (timing, url/b64 presence, preview result); never prompts, keys, or bodies |
+| `OPENROUTER_APP_TITLE`    | `openrouter-image-mcp`               | OpenRouter `X-Title` header                                                                                             |
+| `OPENROUTER_APP_REFERER`  | empty                                | Optional OpenRouter `HTTP-Referer` header                                                                               |
 
 ## Testing
 
