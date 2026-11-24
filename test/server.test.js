@@ -6,10 +6,15 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { createMockOpenRouter, TINY_PNG_BASE64 } from '../scripts/mock-openrouter.js';
 import { loadConfig, startServer } from '../server.js';
 
+// 16x16 WebP (68 bytes). OpenRouter image models return WebP even when PNG is
+// requested, so the URL-only synthesis path must decode it.
+const TINY_WEBP_BASE64 = 'UklGRjwAAABXRUJQVlA4IDAAAADQAQCdASoQABAAAUAiJaACdLoB+AADsAD+8MQL/wq3DENdX/5Af8gP+QH/8eQAAAA=';
+
 let mock;
 let mcp;
 let imageServer;
 let imageUrl;
+let webpImageUrl;
 let config;
 
 before(async () => {
@@ -27,7 +32,13 @@ before(async () => {
   mcp = await startServer(config);
 
   const pngBuffer = Buffer.from(TINY_PNG_BASE64, 'base64');
+  const webpBuffer = Buffer.from(TINY_WEBP_BASE64, 'base64');
   imageServer = createServer((req, res) => {
+    if ((req.url || '').endsWith('.webp')) {
+      res.writeHead(200, { 'Content-Type': 'image/webp' });
+      res.end(webpBuffer);
+      return;
+    }
     res.writeHead(200, { 'Content-Type': 'image/png' });
     res.end(pngBuffer);
   });
@@ -35,6 +46,7 @@ before(async () => {
   const address = imageServer.address();
   const port = typeof address === 'object' && address ? address.port : 0;
   imageUrl = `http://127.0.0.1:${port}/image.png`;
+  webpImageUrl = `http://127.0.0.1:${port}/image.webp`;
 });
 
 after(async () => {
@@ -233,13 +245,44 @@ test('synthesizes base64 preview when OpenRouter returns url-only', async () => 
     assert.equal(result.isError, undefined);
     const image = result.content.find((item) => item.type === 'image');
     assert.ok(image, 'expected synthesized image block from URL');
-    assert.equal(image.mimeType, 'image/png');
+    assert.equal(image.mimeType, 'image/webp');
     assert.ok(image.data.length > 0);
     assert.ok(
       result.content.some((item) => item.type === 'text' && item.text.includes(imageUrl)),
       'expected URL text in content'
     );
     assert.equal(mock.requests[0].body.response_format, 'url');
+  } finally {
+    await client.close();
+    mock.setResponse(undefined);
+  }
+});
+
+test('synthesizes preview when the URL serves WebP (as OpenRouter models do)', async () => {
+  mock.setResponse(() => ({
+    status: 200,
+    body: {
+      created: Math.floor(Date.now() / 1000),
+      data: [{ url: webpImageUrl, media_type: 'image/webp' }],
+      usage: { cost: 0.001 },
+    },
+  }));
+  mock.requests.length = 0;
+  const { client } = await connect('test-key');
+  try {
+    const result = await client.callTool({
+      name: 'generate_image',
+      arguments: { prompt: 'x', n: 1 },
+    });
+    assert.equal(result.isError, undefined);
+    const image = result.content.find((item) => item.type === 'image');
+    assert.ok(image, 'expected synthesized image block from a WebP URL');
+    assert.match(image.mimeType, /^image\/webp$/);
+    assert.ok(image.data.length > 0);
+    assert.ok(
+      result.content.some((item) => item.type === 'text' && item.text.includes(webpImageUrl)),
+      'expected URL text in content'
+    );
   } finally {
     await client.close();
     mock.setResponse(undefined);

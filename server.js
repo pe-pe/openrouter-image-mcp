@@ -3,8 +3,11 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, McpError } from '@modelcontextprotocol/sdk/types.js';
 import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { Jimp } from 'jimp';
+import decodeWebp, { init as initWebpDecoder } from '@jsquash/webp/decode.js';
+import encodeWebp, { init as initWebpEncoder } from '@jsquash/webp/encode.js';
 
 // ---------------------------------------------------------------------------
 // OpenRouter Image Generation MCP Server (Streamable HTTP)
@@ -23,6 +26,7 @@ const DEFAULT_OUTPUT_FORMAT = 'png';
 const DEFAULT_IMAGE_MODEL = 'recraft/recraft-v4.1-flash-v2:free';
 const MAX_ERROR_TEXT = 800;
 const DOWNLOAD_SHORTER_SIDE = 768;
+const PREVIEW_QUALITY = 82;
 
 const ASPECT_RATIOS = [
   'auto',
@@ -301,19 +305,80 @@ function errorResult(message) {
   };
 }
 
+let webpDecoderReady;
+function ensureWebpDecoder() {
+  if (!webpDecoderReady) {
+    webpDecoderReady = (async () => {
+      const require = createRequire(import.meta.url);
+      const wasmPath = require.resolve('@jsquash/webp/codec/dec/webp_dec.wasm');
+      await initWebpDecoder(await WebAssembly.compile(readFileSync(wasmPath)));
+    })();
+  }
+  return webpDecoderReady;
+}
+
+let webpEncoderReady;
+function ensureWebpEncoder() {
+  if (!webpEncoderReady) {
+    webpEncoderReady = (async () => {
+      const require = createRequire(import.meta.url);
+      const wasmPath = require.resolve('@jsquash/webp/codec/enc/webp_enc.wasm');
+      await initWebpEncoder(await WebAssembly.compile(readFileSync(wasmPath)));
+    })();
+  }
+  return webpEncoderReady;
+}
+
+function isWebp(buffer) {
+  return buffer.length >= 12 && buffer.toString('ascii', 0, 4) === 'RIFF' && buffer.toString('ascii', 8, 12) === 'WEBP';
+}
+
+async function decodeWebpToBitmap(buffer) {
+  await ensureWebpDecoder();
+  const result = await decodeWebp(new Uint8Array(buffer).buffer);
+  return {
+    data: Buffer.from(new Uint8Array(result.data.buffer, result.data.byteOffset, result.data.byteLength)),
+    width: result.width,
+    height: result.height,
+  };
+}
+
+/**
+ * Decode an image buffer into a Jimp instance. OpenRouter returns WebP for some
+ * models regardless of the requested output_format, and Jimp has no built-in
+ * WebP decoder, so WebP is decoded via @jsquash/webp (WASM) and loaded with
+ * Jimp.fromBitmap. Other formats use Jimp's built-in decoders.
+ */
+async function readImage(buffer) {
+  if (isWebp(buffer)) {
+    return Jimp.fromBitmap(await decodeWebpToBitmap(buffer));
+  }
+  return Jimp.read(buffer);
+}
+
+async function encodeWebpPreview(image) {
+  await ensureWebpEncoder();
+  const { data, width, height } = image.bitmap;
+  const encoded = await encodeWebp(
+    { data: new Uint8ClampedArray(data.buffer, data.byteOffset, data.byteLength), width, height },
+    { quality: PREVIEW_QUALITY }
+  );
+  return { data: Buffer.from(encoded).toString('base64'), mimeType: 'image/webp' };
+}
+
 /**
  * Fetch an OpenRouter image URL and produce a downsized base64 preview.
  * The shorter side is resized to DOWNLOAD_SHORTER_SIDE px (aspect preserved)
- * and the image is re-encoded using `mimeType` (default image/png).
- * Returns null on any fetch/decode/encode error so the caller can fall back
- * to URL text only instead of failing generation.
+ * and re-encoded as WebP (small, supports alpha). Falls back to PNG if WebP
+ * encoding fails. Returns { data, mimeType } or null on any fetch/decode/encode
+ * error so the caller can fall back to URL text only.
  */
-async function fetchAndDownsizeImage(url, { mimeType = 'image/png', timeoutMs } = {}) {
+async function fetchAndDownsizeImage(url, { timeoutMs } = {}) {
   try {
     const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
     if (!response.ok) return null;
     const buffer = Buffer.from(await response.arrayBuffer());
-    const image = await Jimp.read(buffer);
+    const image = await readImage(buffer);
     const shorter = Math.min(image.width, image.height);
     if (shorter > DOWNLOAD_SHORTER_SIDE) {
       if (image.width <= image.height) {
@@ -322,9 +387,14 @@ async function fetchAndDownsizeImage(url, { mimeType = 'image/png', timeoutMs } 
         image.resize({ h: DOWNLOAD_SHORTER_SIDE });
       }
     }
-    const encoded = await image.getBuffer(mimeType);
-    return encoded.toString('base64');
-  } catch {
+    try {
+      return await encodeWebpPreview(image);
+    } catch {
+      const encoded = await image.getBuffer('image/png');
+      return { data: Buffer.from(encoded).toString('base64'), mimeType: 'image/png' };
+    }
+  } catch (error) {
+    console.error('[fetchAndDownsizeImage] failed:', error?.message || String(error));
     return null;
   }
 }
@@ -364,11 +434,10 @@ async function formatResult(data, { model, config }) {
       }
     } else if (hasUrl) {
       const synthesized = await fetchAndDownsizeImage(image.url, {
-        mimeType,
         timeoutMs: config.openRouterTimeoutMs,
       });
       if (synthesized) {
-        content.push({ type: 'image', data: synthesized, mimeType });
+        content.push({ type: 'image', data: synthesized.data, mimeType: synthesized.mimeType });
       }
       content.push({ type: 'text', text: `Image ${index + 1}: ${image.url}` });
     } else {
