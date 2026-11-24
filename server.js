@@ -422,6 +422,30 @@ async function fetchAndDownsizeImage(url, { timeoutMs, log = () => {} } = {}) {
 
 async function formatResult(data, { model, config }) {
   const images = Array.isArray(data.data) ? data.data : [];
+
+  const entries = images.map((image, index) => {
+    if (!image || typeof image !== 'object' || Array.isArray(image)) {
+      return { error: `Image ${index + 1}: OpenRouter returned an invalid image entry.` };
+    }
+    const hasB64 = typeof image.b64_json === 'string' && image.b64_json.length > 0;
+    const hasUrl = typeof image.url === 'string' && image.url.length > 0;
+    if (!hasB64 && !hasUrl) {
+      return { error: `Image ${index + 1}: OpenRouter returned no b64_json or url.` };
+    }
+    return { image, index, hasB64, hasUrl };
+  });
+
+  const invalid = entries.find((entry) => entry.error);
+  if (invalid) return errorResult(invalid.error);
+
+  // Every URL is listed up front in the leading text block so it is always
+  // delivered and clearly separated from the inline preview image blocks.
+  const urlLines = entries.map((entry) =>
+    entry.hasUrl
+      ? `Full-quality URL ${entry.index + 1}: ${entry.image.url}`
+      : `Full-quality URL ${entry.index + 1}: not provided (only the inline image is available)`
+  );
+
   const summary = {
     model,
     images: images.length,
@@ -429,20 +453,22 @@ async function formatResult(data, { model, config }) {
     expires_at: data.expires_at,
     usage: data.usage,
   };
-  const content = [
-    {
-      type: 'text',
-      text: `Generated ${images.length} image(s) with ${model}.\n\n${JSON.stringify(summary, null, 2)}`,
-    },
-  ];
 
-  for (let index = 0; index < images.length; index += 1) {
-    const image = images[index];
-    if (!image || typeof image !== 'object' || Array.isArray(image)) {
-      return errorResult(`Image ${index + 1}: OpenRouter returned an invalid image entry.`);
-    }
-    const hasB64 = typeof image.b64_json === 'string' && image.b64_json.length > 0;
-    const hasUrl = typeof image.url === 'string' && image.url.length > 0;
+  const header = [
+    `Generated ${images.length} image(s) with ${model}.`,
+    '',
+    'The inline image block(s) below are for display only. When a full-quality URL is ' +
+      'listed below, use it to get the actual image — the inline image may be a downsized preview:',
+    '',
+    urlLines.join('\n'),
+    '',
+    JSON.stringify(summary, null, 2),
+  ].join('\n');
+
+  const content = [{ type: 'text', text: header }];
+
+  for (const entry of entries) {
+    const { image, index, hasB64, hasUrl } = entry;
     logInfo(config, `image ${index + 1}: url=${hasUrl ? 'yes' : 'no'} b64=${hasB64 ? 'yes' : 'no'}`);
 
     // OpenRouter-supplied b64_json is passed through as-is (no downsizing). A
@@ -450,21 +476,17 @@ async function formatResult(data, { model, config }) {
     // and returns a URL instead.
     if (hasB64) {
       const mimeType = typeof image.media_type === 'string' ? image.media_type : 'image/png';
+      content.push({ type: 'text', text: `Inline image ${index + 1} (as returned by OpenRouter):` });
       content.push({ type: 'image', data: image.b64_json, mimeType });
-      if (hasUrl) {
-        content.push({ type: 'text', text: `Image ${index + 1}: ${image.url}` });
-      }
     } else if (hasUrl) {
       const synthesized = await fetchAndDownsizeImage(image.url, {
         timeoutMs: config.openRouterTimeoutMs,
         log: (message) => logInfo(config, `image ${index + 1}: ${message}`),
       });
       if (synthesized) {
+        content.push({ type: 'text', text: `Preview ${index + 1} (downsized, not the full-quality image):` });
         content.push({ type: 'image', data: synthesized.data, mimeType: synthesized.mimeType });
       }
-      content.push({ type: 'text', text: `Image ${index + 1}: ${image.url}` });
-    } else {
-      return errorResult(`Image ${index + 1}: OpenRouter returned no b64_json or url.`);
     }
   }
 
@@ -535,8 +557,8 @@ export function buildTool(config) {
     title: 'Generate image',
     description:
       'Generate an image from a text prompt using OpenRouter image models. ' +
-      'Always returns the direct OpenRouter URL plus an inline MCP image preview ' +
-      '(downsized to ~768px on the shorter side) derived from the response.',
+      'Returns the full-quality image URL(s) as text plus, for display, downsized inline preview(s). ' +
+      'The URL points to the actual full-quality image; the inline image is only a preview.',
     inputSchema: {
       type: 'object',
       properties: {

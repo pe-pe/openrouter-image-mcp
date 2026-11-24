@@ -157,10 +157,10 @@ Example call from an MCP client:
 }
 ```
 
-The server always requests `response_format: url` from OpenRouter so the direct full-quality URL is available, then returns:
+The server always requests `response_format: url` from OpenRouter so the direct full-quality URL is available. The tool result is structured so a model can tell the preview from the real image:
 
-- an inline MCP `image` block with a base64 preview: OpenRouter's `b64_json` is returned as-is when present; when OpenRouter only returns a URL, the server fetches it (bounded to 30s) and synthesizes a WebP preview downsized to ~768px on the shorter side (aspect preserved; WebP is decoded via WASM and re-encoded at quality 82, falling back to PNG if WebP encoding fails), and
-- a text line with the direct OpenRouter URL for full-quality download (omitted when OpenRouter returns no URL).
+- a leading text block listing every full-quality URL as `Full-quality URL N: <url>`, plus the usage summary;
+- then, per image, a labeled `image` block: OpenRouter's `b64_json` is shown as `Inline image N (as returned by OpenRouter)` when present; when OpenRouter only returns a URL, the server fetches it (bounded to 30s) and shows `Preview N (downsized, not the full-quality image)` — a WebP downsized to ~768px on the shorter side (aspect preserved; WebP decoded via WASM, re-encoded at quality 82, PNG fallback).
 
 If OpenRouter returns neither field, the tool returns an error.
 
