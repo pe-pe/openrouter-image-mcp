@@ -7,13 +7,14 @@ mcpServers:
   openrouter-image:
     type: streamable-http
     url: http://openrouter-image-mcp:3333/mcp
-    requiresOAuth: false
-    timeout: 120000
-    initTimeout: 30000
-    serverInstructions: true
-    apiKey:
-      source: user
-      authorization_type: bearer
+    title: Image Generation
+    customUserVars:
+      OPENROUTER_API_KEY:
+        title: OpenRouter API key
+        description: Enter your own OpenRouter API key (sk-or-v1-...).
+        sensitive: true
+    headers:
+      Authorization: 'Bearer {{OPENROUTER_API_KEY}}'
 
 # If LibreChat's SSRF protection is enabled, allow the private host:port.
 # Entries use host:port without a scheme.

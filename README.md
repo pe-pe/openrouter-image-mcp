@@ -16,18 +16,15 @@ bills to that user's own OpenRouter account. The key is never written to disk.
 | MCP over Streamable HTTP       | `@modelcontextprotocol/sdk` stateless transport at `/mcp` |
 | Only selected tools            | Only `generate_image` is registered                       |
 | Per-user API key on every call | Read from `Authorization: Bearer` per request             |
-| No OAuth                       | API key only; `requiresOAuth: false`                      |
-| No Fireworks                   | OpenRouter only                                           |
 | Docker deployable              | Multi-stage `Dockerfile`, non-root runtime                |
 | Local testing without credits  | Mock OpenRouter API and smoke test                        |
 
 ## How it works
 
 1. LibreChat calls `POST /mcp` with `Authorization: Bearer <user OpenRouter key>`.
-2. The server extracts the key for that request only. It does not keep a session
-   key map and does not log the key.
+2. The server extracts the key for that request only and never logs it.
 3. `generate_image` validates the arguments and forwards them to OpenRouter's
-   Images API, always requesting `response_format: url` so the direct full-quality URL is available.
+   Images API.
 
 The server is stateless: each MCP request creates its own server and transport
 instance. That keeps per-user keys isolated and makes horizontal scaling simple.
@@ -51,7 +48,7 @@ instance. That keeps per-user keys isolated and makes horizontal scaling simple.
 
 ## Quick start (Node.js)
 
-Requires Node.js 20.19 or newer (the Docker image uses Node 22).
+Requires Node.js 20.19 or newer.
 
 ```bash
 npm ci
@@ -92,14 +89,19 @@ mcpServers:
   openrouter-image:
     type: streamable-http
     url: http://openrouter-image-mcp:3333/mcp
-    requiresOAuth: false
-    timeout: 120000
-    initTimeout: 30000
-    serverInstructions: true
-    apiKey:
-      source: user
-      authorization_type: bearer
+    title: Image Generation
+    customUserVars:
+      OPENROUTER_API_KEY:
+        title: OpenRouter API key
+        description: Enter your own OpenRouter API key (sk-or-v1-...).
+        sensitive: true
+    headers:
+      Authorization: 'Bearer {{OPENROUTER_API_KEY}}'
 ```
+
+`customUserVars` makes LibreChat prompt each user for their own OpenRouter key
+and send it as `Authorization: Bearer <key>` on every MCP request, so each
+user's generations bill to their own account.
 
 The URL above assumes LibreChat and this server share a Docker network. For a
 LibreChat process running on the host, use `http://localhost:3333/mcp`.
@@ -114,31 +116,6 @@ mcpSettings:
 
 Entries are `host:port` without a scheme, matching the server URL.
 
-### Per-user API key (recommended)
-
-`apiKey.source: user` makes LibreChat prompt each user for their own OpenRouter
-key. LibreChat sends it as `Authorization: Bearer <key>` on every MCP request.
-This is the intended deployment: each user's generations bill to their own
-OpenRouter account.
-
-The same header can be supplied through `customUserVars` when you need a custom
-header name or more control:
-
-```yaml
-mcpServers:
-  openrouter-image:
-    type: streamable-http
-    url: http://openrouter-image-mcp:3333/mcp
-    requiresOAuth: false
-    customUserVars:
-      OPENROUTER_API_KEY:
-        title: OpenRouter API key
-        description: Enter your own OpenRouter API key (sk-or-v1-...).
-        sensitive: true
-    headers:
-      Authorization: 'Bearer {{OPENROUTER_API_KEY}}'
-```
-
 ### Admin key (single key for all users)
 
 If you prefer one shared key, set `OPENROUTER_API_KEY` in the server process
@@ -151,13 +128,6 @@ docker run --rm -p 3333:3333 \
 ```
 
 Per-user headers always take precedence over the environment fallback.
-
-### LibreChat UI
-
-1. Open **MCP Settings** in LibreChat.
-2. Add or edit the `openrouter-image` server.
-3. Choose **API Key**, then **User provides key**, then **Bearer**.
-4. Each user enters their own OpenRouter key.
 
 ## Tool schema
 
@@ -182,9 +152,7 @@ Example call from an MCP client:
   "name": "generate_image",
   "arguments": {
     "prompt": "A red panda wearing a tiny astronaut helmet, studio lighting",
-    "model": "recraft/recraft-v4.1-flash-v2:free",
-    "aspect_ratio": "16:9",
-    "resolution": "2K"
+    "aspect_ratio": "16:9"
   }
 }
 ```
@@ -194,7 +162,7 @@ The server always requests `response_format: url` from OpenRouter so the direct 
 - an inline MCP `image` block with a base64 preview: OpenRouter's `b64_json` is returned as-is when present; when OpenRouter only returns a URL, the server fetches it (bounded to 30s) and synthesizes a WebP preview downsized to ~768px on the shorter side (aspect preserved; WebP is decoded via WASM and re-encoded at quality 82, falling back to PNG if WebP encoding fails), and
 - a text line with the direct OpenRouter URL for full-quality download (omitted when OpenRouter returns no URL).
 
-If OpenRouter returns only `b64_json`, the URL text is omitted. If it returns neither, the tool returns an error.
+If OpenRouter returns neither field, the tool returns an error.
 
 ## Models
 
@@ -217,19 +185,19 @@ list; OpenRouter validates the model and its parameters.
 
 ## Configuration
 
-| Variable                  | Default                              | Purpose                                                                                                                 |
-| ------------------------- | ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
-| `HOST`                    | `0.0.0.0`                            | Listen address                                                                                                          |
-| `PORT`                    | `3333`                               | Listen port                                                                                                             |
-| `OPENROUTER_API_BASE_URL` | `https://openrouter.ai/api/v1`       | API base; point at the mock for tests                                                                                   |
-| `OPENROUTER_API_KEY`      | empty                                | Optional admin fallback key                                                                                             |
-| `DEFAULT_IMAGE_MODEL`     | `recraft/recraft-v4.1-flash-v2:free` | Model used when `model` is omitted                                                                                      |
-| `OPENROUTER_TIMEOUT_MS`   | `120000`                             | OpenRouter request timeout                                                                                              |
-| `MAX_BODY_BYTES`          | `1000000`                            | Maximum MCP request body size                                                                                           |
-| `CORS_ORIGIN`             | empty                                | Comma-separated origins or `*`; empty disables CORS                                                                     |
-| `LOG_REQUESTS`            | `true`                               | Log HTTP requests and `generate_image` steps (timing, url/b64 presence, preview result); never prompts, keys, or bodies |
-| `OPENROUTER_APP_TITLE`    | `openrouter-image-mcp`               | OpenRouter `X-Title` header                                                                                             |
-| `OPENROUTER_APP_REFERER`  | empty                                | Optional OpenRouter `HTTP-Referer` header                                                                               |
+| Variable                  | Default                              | Purpose                                                                                 |
+| ------------------------- | ------------------------------------ | --------------------------------------------------------------------------------------- |
+| `HOST`                    | `0.0.0.0`                            | Listen address                                                                          |
+| `PORT`                    | `3333`                               | Listen port                                                                             |
+| `OPENROUTER_API_BASE_URL` | `https://openrouter.ai/api/v1`       | API base; point at the mock for tests                                                   |
+| `OPENROUTER_API_KEY`      | empty                                | Optional admin fallback key                                                             |
+| `DEFAULT_IMAGE_MODEL`     | `recraft/recraft-v4.1-flash-v2:free` | Model used when `model` is omitted                                                      |
+| `OPENROUTER_TIMEOUT_MS`   | `120000`                             | OpenRouter request timeout                                                              |
+| `MAX_BODY_BYTES`          | `1000000`                            | Maximum MCP request body size                                                           |
+| `CORS_ORIGIN`             | empty                                | Comma-separated origins or `*`; empty disables CORS                                     |
+| `LOG_REQUESTS`            | `true`                               | Log HTTP requests and `generate_image` steps (timing, url/b64 presence, preview result) |
+| `OPENROUTER_APP_TITLE`    | `openrouter-image-mcp`               | OpenRouter `X-Title` header                                                             |
+| `OPENROUTER_APP_REFERER`  | empty                                | Optional OpenRouter `HTTP-Referer` header                                               |
 
 ## Testing
 
@@ -314,7 +282,7 @@ mock on `127.0.0.1:4010`. No real OpenRouter key is used in CI.
 
 | Symptom                              | Fix                                                                                                                                                  |
 | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `No OpenRouter API key was provided` | Configure `apiKey.source: user` in LibreChat or send `Authorization: Bearer <key>`                                                                   |
+| `No OpenRouter API key was provided` | Configure `customUserVars` for `OPENROUTER_API_KEY` in LibreChat (see LibreChat configuration) or send `Authorization: Bearer <key>`                 |
 | `401` from OpenRouter                | The user's key is invalid or revoked                                                                                                                 |
 | `402` from OpenRouter                | The user's OpenRouter account has insufficient credits                                                                                               |
 | `429` from OpenRouter                | Rate limit reached; retry later                                                                                                                      |
